@@ -60,6 +60,8 @@ Whether you’re a job seeker or a recruiter, this tool simplifies resume assess
 
 ---
 
+![image](https://github.com/user-attachments/assets/418e54ef-82d0-474b-a6bc-9a30d72f27f5)
+
 ## 🙌 **Contributing**
 
 Welcome contributions to make this tool better!
