@@ -8,17 +8,17 @@ import google.generativeai as genai
 from pdf2image import convert_from_path
 import pytesseract
 import pdfplumber
+import re
+
 
 # Load environment variables
 load_dotenv()
 
-# Configure Google Gemini AI
+# Configure Gemini
 genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
-
-# Scrapingdog API Key
 SCRAPINGDOG_API_KEY = os.getenv("SCRAPINGDOG_API_KEY")
 
-# Function to extract text from PDF
+# PDF text extractor
 def extract_text_from_pdf(pdf_path):
     text = ""
     try:
@@ -29,196 +29,227 @@ def extract_text_from_pdf(pdf_path):
                     text += page_text
         if text.strip():
             return text.strip()
-    except Exception as e:
-        print(f"Direct text extraction failed: {e}")
-    
-    print("Falling back to OCR for image-based PDF.")
+    except:
+        pass
+
     try:
         images = convert_from_path(pdf_path)
         for image in images:
-            page_text = pytesseract.image_to_string(image)
-            text += page_text + "\n"
-    except Exception as e:
-        print(f"OCR failed: {e}")
-    
+            text += pytesseract.image_to_string(image) + "\n"
+    except:
+        pass
+
     return text.strip()
 
-# Function to analyze resume with Gemini AI and provide a score
+# Analyze resume
 def analyze_resume(resume_text, job_description=None):
-    if not resume_text:
-        return {"error": "Resume text is required for analysis."}
-    
     model = genai.GenerativeModel("gemini-1.5-flash")
-    
-    base_prompt = f"""
-    You are an experienced HR professional. Review the provided resume and provide an analysis including:
-    - Key skills the candidate has
-    - Strengths and weaknesses
-    - Suggested skills to improve
-    - Recommended courses to enhance skills
-    - Provide a resume score out of 100 based on structure, relevance, and clarity.
-    
+
+    prompt = f"""
+    You are an experienced HR professional. Analyze the following resume:
+    - Key skills
+    - Strengths & weaknesses
+    - Skills to improve
+    - Recommended courses
+    - ATS resume score (out of 100)
+
     Resume:
     {resume_text}
     """
-
     if job_description:
-        base_prompt += f"""
-        Additionally, compare this resume to the following job description:
-        
+        prompt += f"""
+
         Job Description:
         {job_description}
-        
-        Highlight the strengths and weaknesses of the applicant in relation to the specified job requirements.
-        Adjust the resume score based on relevance to this job.
+
+        Compare the resume with the job description and adjust the ATS score accordingly.
         """
 
-    response = model.generate_content(base_prompt)
-    analysis_text = response.text.strip()
-    score = extract_score_from_analysis(analysis_text)
-    
-    return analysis_text, score
+    response = model.generate_content(prompt)
+    result = response.text.strip()
+    score = extract_score(result)
+    return result, score
 
-# Function to extract the resume score from the AI response
-def extract_score_from_analysis(analysis_text):
-    import re
-    score_match = re.search(r'\b(\d{1,2}|100)\b', analysis_text)
-    return int(score_match.group()) if score_match else None
+# Extract score
+def extract_score(text):
+    match = re.search(r'(\d{1,2}|100)\s*/\s*100', text)
+    if not match:
+        match = re.search(r'\b(\d{1,2}|100)\b', text)
+    return int(match.group(1)) if match else None
 
-# Function to extract skills separately from resume
+# Extract skills
 def extract_skills(resume_text):
     model = genai.GenerativeModel("gemini-1.5-flash")
-    
     prompt = f"""
-    Extract the main technical and soft skills from the following resume.
-    Provide only a comma-separated list of skills.
-    
+    Extract only technical and soft skills from this resume as a comma-separated list.
+
     Resume:
     {resume_text}
     """
-    
     response = model.generate_content(prompt)
-    skills = response.text.strip().split(", ")
-    return skills
+    return [skill.strip() for skill in response.text.split(",")]
 
-# Function to fetch jobs using Scrapingdog API
-def fetch_jobs_from_scrapingdog(skills, location="100293800",max_jobs=10):  # Use correct geoid for India
+# Get job recommendations
+def fetch_jobs(skills, location="100293800", max_jobs=10):
     url = "https://api.scrapingdog.com/linkedinjobs/"
     job_results = []
-    
-    for skill in skills[:5]:  # Limit to 5 skills to avoid excessive API calls
-        page = 1
 
-        while True:  # Loop to fetch multiple pages
+    for skill in skills[:5]:
+        page = 1
+        while True:
             params = {
                 "api_key": SCRAPINGDOG_API_KEY,
                 "field": skill,
-                "geoid": location,  # Corrected geoid for India
+                "geoid": location,
                 "page": str(page),
-                "sort_by": "week",  # Optional: Get jobs from the last 7 days
-                "job_type": "full_time",  # Optional: Only full-time jobs
-                "exp_level": "entry_level"  # Optional: Entry-level jobs
+                "sort_by": "week",
+                "job_type": "full_time",
+                "exp_level": "entry_level"
             }
             response = requests.get(url, params=params)
 
-            print(f"Requesting jobs for skill: {skill} (Page {page})")  # Debug log
-
             if response.status_code == 200:
-                try:
-                    data = response.json()
-                    print("Full API Response:", data)  # 🔍 Debugging: Print full API response
-
-                    if not isinstance(data, list):  # Ensure response is a list
-                        print("Unexpected API response format:", data)
-                        break
-
-                    if not data:  # If response is empty, stop fetching more pages
-                        break
-
-                    for job in data[:3]:  # Get top 3 jobs per page
-                        job_results.append(
-                            {
-                                "title": job["job_position"],
-                                "company": job["company_name"],
-                                "link": job["job_link"],
-                            }
-                        )
-
-                    page += 1  # Go to next page
-                    if len(data) < 10:  # Stop if less than 10 jobs on the page
-                        break
-                    if len(job_results) >= max_jobs:
-                        
-                        return job_results[:max_jobs]
-                
-                except Exception as e:
-                    print(f"Error processing JSON response: {e}")
+                data = response.json()
+                if not isinstance(data, list) or not data:
                     break
+                for job in data[:3]:
+                    job_results.append({
+                        "title": job["job_position"],
+                        "company": job["company_name"],
+                        "link": job["job_link"],
+                    })
+                if len(job_results) >= max_jobs or len(data) < 10:
+                    return job_results[:max_jobs]
+                page += 1
             else:
-                print(f"API Request failed: {response.status_code} - {response.text}")
                 break
 
     return job_results[:max_jobs]
 
+# --- Streamlit Web App ---
+# Add this at the top of your Streamlit script
 
 
+# Theme toggle
+if "dark_mode" not in st.session_state:
+    st.session_state.dark_mode = False
 
-# Streamlit app
-st.set_page_config(page_title="AI Resume & Job Matcher", layout="wide")
+st.sidebar.title("⚙️ Settings")
+st.session_state.dark_mode = st.sidebar.toggle("🌙 Dark Mode", value=st.session_state.dark_mode)
 
-st.title("AI Resume Analyzer & Job Recommender")
-st.write("Upload your resume, and we’ll suggest jobs that match your skills!")
+# Define color variables based on theme
+if st.session_state.dark_mode:
+    bg_color = "#000000"
+    text_color = "#f0f0f0"
+    accent_color = "#1f77b4"
+else:
+    bg_color = "#f9f9f9"
+    text_color = "#262730"
+    accent_color = "#4CAF50"
 
-col1, col2 = st.columns(2)
-with col1:
-    uploaded_file = st.file_uploader("Upload your resume (PDF)", type=["pdf"])
-with col2:
-    job_description = st.text_area("Enter Job Description:", placeholder="Paste the job description here...")
+# Custom CSS styles for dark/light mode
+st.markdown(f"""
+    <style>
+        html, body, [class*="css"]  {{
+            background-color: {bg_color};
+            color: {text_color};
+        }}
+        .stButton>button {{
+            background-color: {accent_color};
+            color: white;
+            font-weight: bold;
+            border: none;
+            border-radius: 0.4em;
+            padding: 0.5em 1em;
+        }}
+        .stButton>button:hover {{
+            background-color: #45a049;
+        }}
+        .stSelectbox, .stTextArea, .stFileUploader, .stRadio, .stTextInput {{
+            border-radius: 0.4em;
+        }}
+        h1, h2, h3, h4 {{
+            color: {accent_color};
+        }}
+    </style>
+""", unsafe_allow_html=True)
 
-if uploaded_file:
-    st.success("Resume uploaded successfully!")
+# st.set_page_config(page_title="AI Resume Chatbot", layout="centered")
+st.title("🤖 AI Resume Chatbot Assistant")
 
-if uploaded_file and st.button("Analyze Resume & Get Job Matches"):
-    with st.spinner("Processing..."):
-        with open("uploaded_resume.pdf", "wb") as f:
-            f.write(uploaded_file.getbuffer())
-        
-        resume_text = extract_text_from_pdf("uploaded_resume.pdf")
-        
-        # Resume Analysis
-        st.write("## 📑 Resume Analysis")
-        analysis, score = analyze_resume(resume_text, job_description)
-        st.write(analysis)
-        
-        if score is not None:
-            st.write(f"### 📊 Resume Score: **{score}/100**")
+if "stage" not in st.session_state:
+    st.session_state.stage = "start"
+if "resume_text" not in st.session_state:
+    st.session_state.resume_text = None
+if "score" not in st.session_state:
+    st.session_state.score = None
+if "analysis" not in st.session_state:
+    st.session_state.analysis = None
+if "skills" not in st.session_state:
+    st.session_state.skills = []
+
+# Start screen
+if st.session_state.stage == "start":
+    st.markdown("👋 Welcome! What would you like to do?")
+    option = st.selectbox(
+        "Choose an option:",
+        ["Get ATS Score", "Get Resume Analysis", "Enter Preferred Job Description"]
+    )
+    uploaded_file = st.file_uploader("Upload your resume (PDF)", type="pdf")
+
+    job_desc = None
+    if option == "Enter Preferred Job Description":
+        job_desc = st.text_area("Paste the Job Description here...")
+
+    if uploaded_file and st.button("Submit"):
+        with open("resume.pdf", "wb") as f:
+            f.write(uploaded_file.read())
+        text = extract_text_from_pdf("resume.pdf")
+        st.session_state.resume_text = text
+
+        st.session_state.analysis, st.session_state.score = analyze_resume(
+            text,
+            job_description=job_desc if option == "Enter Preferred Job Description" else None
+        )
+
+        st.session_state.skills = extract_skills(text)
+        st.session_state.stage = "results"
+        st.experimental_rerun()
+
+# Results screen
+elif st.session_state.stage == "results":
+    st.subheader("📄 Resume Analysis")
+    st.write(st.session_state.analysis)
+
+    if st.session_state.score is not None:
+        st.success(f"📊 ATS Resume Score: **{st.session_state.score}/100**")
+    else:
+        st.warning("Could not determine a score.")
+
+    st.markdown("### 🧠 Extracted Skills")
+    st.write(", ".join(st.session_state.skills))
+
+    action = st.radio("What would you like to do next?", ["Get Job Recommendations", "Analyze Another Resume"])
+
+    if action == "Get Job Recommendations":
+        with st.spinner("Searching for jobs..."):
+            jobs = fetch_jobs(st.session_state.skills)
+        if jobs:
+            st.markdown("### 💼 Job Matches")
+            for job in jobs:
+                st.markdown(f"- [{job['title']} - {job['company']}]({job['link']})")
         else:
-            st.warning("Could not determine resume score.")
+            st.warning("No jobs found based on your skills.")
 
-        # Extract Skills
-        extracted_skills = extract_skills(resume_text)
-        st.write("### 🔹 Extracted Skills:")
-        st.write(", ".join(extracted_skills))
+    elif action == "Analyze Another Resume":
+        for key in ["resume_text", "score", "analysis", "skills"]:
+            st.session_state[key] = None
+        st.session_state.stage = "start"
+        st.experimental_rerun()
 
-        # Fetch Jobs from Scrapingdog
-        st.write("## 🔍 Job Recommendations")
-        matching_jobs = fetch_jobs_from_scrapingdog(extracted_skills)
-
-        if matching_jobs:
-            for job in matching_jobs:
-                st.markdown(f"🔹 [{job['title']} - {job['company']}]({job['link']})")
-        else:
-            st.warning("No matching jobs found! The API may have changed or the skill parameters may not be returning results.")
-            
-
-
-
-
+# Footer
 st.markdown("---")
-st.markdown(
-    """<p style='text-align: center;'>Powered by <b>Streamlit</b> and <b>Google Gemini AI</b></p>""",
-    unsafe_allow_html=True,
-)
+st.markdown("<center>🚀 Built with <b>Streamlit</b> & <b>Gemini AI</b></center>", unsafe_allow_html=True)
 
 
 
